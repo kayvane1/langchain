@@ -1,7 +1,9 @@
-import json
 from typing import Any, List, Optional, Sequence, Tuple
 
-from langchain.agents.agent import Agent
+from pydantic import Field
+
+from langchain.agents.agent import Agent, AgentOutputParser
+from langchain.agents.chat.output_parser import ChatOutputParser
 from langchain.agents.chat.prompt import FORMAT_INSTRUCTIONS, PREFIX, SUFFIX
 from langchain.callbacks.base import BaseCallbackManager
 from langchain.chains.llm import LLMChain
@@ -14,10 +16,10 @@ from langchain.prompts.chat import (
 from langchain.schema import AgentAction, BaseLanguageModel
 from langchain.tools import BaseTool
 
-FINAL_ANSWER_ACTION = "Final Answer:"
-
 
 class ChatAgent(Agent):
+    output_parser: AgentOutputParser = Field(default_factory=ChatOutputParser)
+
     @property
     def observation_prefix(self) -> str:
         """Prefix to append the observation with."""
@@ -32,6 +34,8 @@ class ChatAgent(Agent):
         self, intermediate_steps: List[Tuple[AgentAction, str]]
     ) -> str:
         agent_scratchpad = super()._construct_scratchpad(intermediate_steps)
+        if not isinstance(agent_scratchpad, str):
+            raise ValueError("agent_scratchpad should be of type string.")
         if agent_scratchpad:
             return (
                 f"This was your previous work "
@@ -41,13 +45,9 @@ class ChatAgent(Agent):
         else:
             return agent_scratchpad
 
-    def _extract_tool_and_input(self, text: str) -> Optional[Tuple[str, str]]:
-        if FINAL_ANSWER_ACTION in text:
-            return "Final Answer", text.split(FINAL_ANSWER_ACTION)[-1].strip()
-        _, action, _ = text.split("```")
-
-        response = json.loads(action.strip())
-        return response["action"], response["action_input"]
+    @classmethod
+    def _get_default_output_parser(cls, **kwargs: Any) -> AgentOutputParser:
+        return ChatOutputParser()
 
     @property
     def _stop(self) -> List[str]:
@@ -70,9 +70,9 @@ class ChatAgent(Agent):
             SystemMessagePromptTemplate.from_template(template),
             HumanMessagePromptTemplate.from_template("{input}\n\n{agent_scratchpad}"),
         ]
-        return ChatPromptTemplate(
-            input_variables=["input", "agent_scratchpad"], messages=messages
-        )
+        if input_variables is None:
+            input_variables = ["input", "agent_scratchpad"]
+        return ChatPromptTemplate(input_variables=input_variables, messages=messages)
 
     @classmethod
     def from_llm_and_tools(
@@ -80,6 +80,7 @@ class ChatAgent(Agent):
         llm: BaseLanguageModel,
         tools: Sequence[BaseTool],
         callback_manager: Optional[BaseCallbackManager] = None,
+        output_parser: Optional[AgentOutputParser] = None,
         prefix: str = PREFIX,
         suffix: str = SUFFIX,
         format_instructions: str = FORMAT_INSTRUCTIONS,
@@ -101,7 +102,13 @@ class ChatAgent(Agent):
             callback_manager=callback_manager,
         )
         tool_names = [tool.name for tool in tools]
-        return cls(llm_chain=llm_chain, allowed_tools=tool_names, **kwargs)
+        _output_parser = output_parser or cls._get_default_output_parser()
+        return cls(
+            llm_chain=llm_chain,
+            allowed_tools=tool_names,
+            output_parser=_output_parser,
+            **kwargs,
+        )
 
     @property
     def _agent_type(self) -> str:

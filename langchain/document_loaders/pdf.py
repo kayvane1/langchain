@@ -2,6 +2,7 @@
 import os
 import tempfile
 from abc import ABC
+from io import StringIO
 from typing import Any, List, Optional
 from urllib.parse import urlparse
 
@@ -18,7 +19,7 @@ class UnstructuredPDFLoader(UnstructuredFileLoader):
     def _get_elements(self) -> List:
         from unstructured.partition.pdf import partition_pdf
 
-        return partition_pdf(filename=self.file_path)
+        return partition_pdf(filename=self.file_path, **self.unstructured_kwargs)
 
 
 class BasePDFLoader(BaseLoader, ABC):
@@ -65,6 +66,46 @@ class BasePDFLoader(BaseLoader, ABC):
         return bool(parsed.netloc) and bool(parsed.scheme)
 
 
+class OnlinePDFLoader(BasePDFLoader):
+    """Loader that loads online PDFs."""
+
+    def load(self) -> List[Document]:
+        """Load documents."""
+        loader = UnstructuredPDFLoader(str(self.file_path))
+        return loader.load()
+
+
+class PyPDFLoader(BasePDFLoader):
+    """Loads a PDF with pypdf and chunks at character level.
+
+    Loader also stores page numbers in metadatas.
+    """
+
+    def __init__(self, file_path: str):
+        """Initialize with file path."""
+        try:
+            import pypdf  # noqa:F401
+        except ImportError:
+            raise ValueError(
+                "pypdf package not found, please install it with " "`pip install pypdf`"
+            )
+        super().__init__(file_path)
+
+    def load(self) -> List[Document]:
+        """Load given path as pages."""
+        import pypdf
+
+        with open(self.file_path, "rb") as pdf_file_obj:
+            pdf_reader = pypdf.PdfReader(pdf_file_obj)
+            return [
+                Document(
+                    page_content=page.extract_text(),
+                    metadata={"source": self.file_path, "page": i},
+                )
+                for i, page in enumerate(pdf_reader.pages)
+            ]
+
+
 class PDFMinerLoader(BasePDFLoader):
     """Loader that uses PDFMiner to load PDF files."""
 
@@ -87,6 +128,40 @@ class PDFMinerLoader(BasePDFLoader):
         text = extract_text(self.file_path)
         metadata = {"source": self.file_path}
         return [Document(page_content=text, metadata=metadata)]
+
+
+class PDFMinerPDFasHTMLLoader(BasePDFLoader):
+    """Loader that uses PDFMiner to load PDF files as HTML content."""
+
+    def __init__(self, file_path: str):
+        """Initialize with file path."""
+        try:
+            from pdfminer.high_level import extract_text_to_fp  # noqa:F401
+        except ImportError:
+            raise ValueError(
+                "pdfminer package not found, please install it with "
+                "`pip install pdfminer.six`"
+            )
+
+        super().__init__(file_path)
+
+    def load(self) -> List[Document]:
+        """Load file."""
+        from pdfminer.high_level import extract_text_to_fp
+        from pdfminer.layout import LAParams
+        from pdfminer.utils import open_filename
+
+        output_string = StringIO()
+        with open_filename(self.file_path, "rb") as fp:
+            extract_text_to_fp(
+                fp,  # type: ignore[arg-type]
+                output_string,
+                codec="",
+                laparams=LAParams(),
+                output_type="html",
+            )
+        metadata = {"source": self.file_path}
+        return [Document(page_content=output_string.getvalue(), metadata=metadata)]
 
 
 class PyMuPDFLoader(BasePDFLoader):
@@ -116,6 +191,7 @@ class PyMuPDFLoader(BasePDFLoader):
                 page_content=page.get_text(**kwargs).encode("utf-8"),
                 metadata=dict(
                     {
+                        "source": file_path,
                         "file_path": file_path,
                         "page_number": page.number + 1,
                         "total_pages": len(doc),
